@@ -6,89 +6,82 @@ from datetime import datetime
 
 # --- INITIALIZATION ---
 mlb = mlbstatsapi.Mlb()
-st.set_page_config(layout="wide", page_title="MLB AI Betting Machine 2026")
+st.set_page_config(layout="wide", page_title="MLB AI 2026")
 
-# --- 2026 POWER DATA: PARK FACTORS & UMPIRES ---
-# Factor > 1.00 favors Hitters (OVER), < 1.00 favors Pitchers (UNDER)
-park_factors = {
-    "Coors Field": 1.31,           # Highest in MLB
-    "Sutter Health Park": 1.09,    # New A's stadium (Launching pad)
-    "Great American Ball Park": 1.15,
-    "Wrigley Field": 0.92,         # Pitcher friendly (unless wind is out)
-    "Petco Park": 0.94,
-    "T-Mobile Park": 0.82,         # Massive Under factory
-    "Camelback Ranch-Glendale": 1.05, # Spring Training altitude
-}
-
-# Umpire stats based on 2025-2026 consistency
-umpire_analytics = {
-    "Doug Eddings": {"boost": 0.9, "desc": "Tiny Strike Zone"},
-    "Hunter Wendelstedt": {"boost": 0.7, "desc": "Hitter Friendly"},
-    "Austin Jones": {"boost": -0.6, "desc": "Pitcher's Ump"},
-    "Lance Barrett": {"boost": 0.5, "desc": "Consistent Over"},
-}
-
-def get_live_pitching_score(game_pk, season_mode):
+# --- 2026 LIVE ODDS ENGINE ---
+def get_live_vegas_line(home_team, api_key):
+    """Fetches the actual Over/Under line from the sportsbook."""
+    if not api_key: return 9.5  # Fallback
+    
+    url = f"https://api.the-odds-api.com/v4/sports/baseball_mlb/odds/?apiKey={api_key}&regions=us&markets=totals"
     try:
-        game_data = mlb.get_game_play_by_play(game_pk)
-        if not game_data.all_plays: return 0, "Pre-Game"
-        p_count = game_data.all_plays[-1].about.pitch_index
-        limit = 45 if "Spring" in season_mode else 85
-        if p_count > limit:
-            return 1.4, f"🚨 PEN ALERT ({p_count}P)" # Higher weight for bullpen entry
-        return 0, f"STABLE ({p_count}P)"
+        response = requests.get(url).json()
+        # Find the specific game by home team name
+        for game in response:
+            if home_team in game['home_team']:
+                return game['bookmakers'][0]['markets'][0]['outcomes'][0]['point']
     except:
-        return 0, "No Feed"
+        return 9.5
+    return 9.5
 
-# --- MAIN APP ---
-st.title("⚾ MLB Ultra-Strength Command Center")
-st.sidebar.title("🛠️ Machine Settings")
-season_mode = st.sidebar.radio("Season Phase", ["Spring Training 🌵", "Regular Season ⚾"])
-api_key = st.sidebar.text_input("Odds API Key", type="password")
-min_edge = st.sidebar.slider("Min. Edge (Runs)", 0.5, 3.0, 1.0)
+# --- SPRING TRAINING VOLATILITY MODEL ---
+def calculate_spring_strength(venue_name, away_team):
+    """Adjusts projection based on 2026 Spring-specific factors."""
+    adj = 0.0
+    
+    # 1. Park Factors (Arizona 'Cactus' air is thinner/drier = More Runs)
+    cactus_league_parks = ["Camelback Ranch", "Sloan Park", "Surprise Stadium", "Goodyear Ballpark"]
+    if any(park in venue_name for park in cactus_league_parks):
+        adj += 0.6  # Boost for desert carry
+        
+    # 2. Split Squad (SS) Dilution
+    # If a team is split up, the lineup is weaker = Fewer Runs (Under Lean)
+    if "SS" in away_team or "Split Squad" in away_team:
+        adj -= 0.8
+        
+    return adj
 
-# Fetch Actual Games for Feb 28, 2026
+# --- MAIN DASHBOARD ---
+st.title("⚾ MLB Intelligence: Feb 28, 2026")
+
+# Get Today's Real Schedule
 today = datetime.now().strftime("%Y-%m-%d")
 schedule = mlb.get_scheduled_games_by_date(date=today)
 
+# Sidebar for Key
+api_key = st.sidebar.text_input("Odds API Key", type="password")
+
 if not schedule:
-    st.error("No games found. Is it past the last first pitch?")
+    st.warning("No games found for this date.")
 else:
     for game in schedule:
-        home_team = game.teams.home.team.name
-        away_team = game.teams.away.team.name
+        home = game.teams.home.team.name
+        away = game.teams.away.team.name
         venue = game.venue.name
         
-        # --- THE STRENGTH ENGINE ---
-        # 1. Start with Vegas Base (Connect your API here for real lines)
-        base_line = 9.0 
+        # 1. Fetch the REAL line for THIS specific match
+        vegas_line = get_live_vegas_line(home, api_key)
         
-        # 2. Apply Park Factor
-        p_factor = park_factors.get(venue, 1.0)
-        park_adj = (p_factor - 1.0) * 5 # Adjusts projection based on stadium history
+        # 2. Apply the "Strength" Logic
+        spring_adj = calculate_spring_strength(venue, away)
+        abs_tax = 0.4 # 2026 ABS rule boost
         
-        # 3. Apply Umpire Factor (Mocking Eddings for the Cubs/Dodgers demo)
-        ump_name = "Doug Eddings" if "Cubs" in away_team else "Unknown"
-        ump_data = umpire_analytics.get(ump_name, {"boost": 0, "desc": "Neutral"})
-        
-        # 4. Live Pitching + 2026 Rules
-        pitch_adj, pitch_status = get_live_pitching_score(game.game_pk, season_mode)
-        abs_boost = 0.4 # The 2026 ABS system is favoring hitters
-        
-        # FINAL PROJECTION
-        strength_proj = round((base_line + park_adj + ump_data['boost'] + pitch_adj + abs_boost) * 2) / 2
-        edge = round(strength_proj - base_line, 1)
+        # 3. Final Calculation
+        ai_proj = round((vegas_line + spring_adj + abs_tax) * 2) / 2
+        edge = round(ai_proj - vegas_line, 1)
 
-        # UI DISPLAY
-        with st.expander(f"🏟️ {away_team} @ {home_team} | {venue}"):
-            c1, c2, c3 = st.columns(3)
-            c1.metric("AI Projection", f"{strength_proj} Runs", delta=f"{edge} vs Vegas")
-            c2.write(f"**Umpire:** {ump_name} ({ump_data['desc']})")
-            c2.write(f"**Stadium:** {'🔥' if p_factor > 1.05 else '🧊'} {venue}")
+        # RENDER
+        with st.expander(f"🔥 {away} @ {home}"):
+            col1, col2, col3 = st.columns(3)
+            col1.metric("Vegas Line", vegas_line)
+            col2.metric("AI Projection", ai_proj, delta=edge)
             
-            if abs(edge) >= min_edge:
-                color = "green" if edge > 0 else "red"
-                pick = "OVER" if edge > 0 else "UNDER"
-                c3.markdown(f"### 🎯 PICK: :{color}[{pick} {base_line}]")
+            # Recommendation Logic
+            if edge >= 1.0:
+                col3.success(f"✅ STRONG OVER {vegas_line}")
+                st.write(f"*Reasoning: High-carry air at {venue} + ABS Challenge Favoring Hitters.*")
+            elif edge <= -1.0:
+                col3.error(f"✅ STRONG UNDER {vegas_line}")
+                st.write(f"*Reasoning: Split-squad lineup detected. Defensive value high.*")
             else:
-                c3.info("NO CLEAR EDGE")
+                col3.info("Hold: No Significant Edge")

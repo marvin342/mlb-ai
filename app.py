@@ -1,83 +1,85 @@
 import streamlit as st
 import pandas as pd
-import requests
-import mlbstatsapi
 from datetime import datetime
+import mlbstatsapi
 
 mlb = mlbstatsapi.Mlb()
 
-# 2026 ABS Success Rates (Live data as of March 2, 2026)
-# Higher rate = More strikes turned into balls for hitters = OVER lean
-abs_success_rates = {
-    "Oakland Athletics": 0.69,
-    "San Francisco Giants": 0.66,
-    "Los Angeles Dodgers": 0.21,  # Dodgers are struggling with challenges!
-    "New York Yankees": 0.52
+# --- 2026 LIVE DATA: ABS SUCCESS RATES (Updated Mar 3, 2026) ---
+# Percentage of ball/strike challenges WON. 
+# High win rate = Extended innings = Lean OVER.
+team_abs_stats = {
+    "Oakland Athletics": 0.69, "San Francisco Giants": 0.66, "Cincinnati Reds": 0.61,
+    "Miami Marlins": 0.61, "San Diego Padres": 0.61, "Minnesota Twins": 0.58,
+    "Colorado Rockies": 0.55, "Boston Red Sox": 0.55, "New York Yankees": 0.52,
+    "Detroit Tigers": 0.46, "Texas Rangers": 0.38, "New York Mets": 0.35,
+    "Baltimore Orioles": 0.25, "Los Angeles Dodgers": 0.21
+    # Teams not listed default to League Avg: 0.51
 }
 
-def get_game_details(game_pk):
-    """Fetches real-time weather and starting pitchers."""
-    try:
-        # Using 'hydrate' to get weather + probable pitchers in one call
-        game_data = mlb.get_game(game_pk, hydrate=['weather', 'probablePitcher'])
-        weather = game_data.weather
-        
-        # Pulling probable pitchers
-        away_sp = game_data.teams.away.probable_pitcher.full_name if hasattr(game_data.teams.away, 'probable_pitcher') else "TBD"
-        home_sp = game_data.teams.home.probable_pitcher.full_name if hasattr(game_data.teams.home, 'probable_pitcher') else "TBD"
-        
-        return weather, away_sp, home_sp
-    except:
-        return None, "TBD", "TBD"
+# --- PARK & LEAGUE FACTORS ---
+cactus_parks = [
+    "Salt River Fields", "Sloan Park", "Camelback Ranch", "Goodyear Ballpark",
+    "Surprise Stadium", "Tempe Diablo Stadium", "Hohokam Stadium", 
+    "Peoria Sports Complex", "Scottsdale Stadium", "American Family Fields"
+]
 
-def calculate_refined_edge(venue, home_team, away_team, weather):
+def get_projection_logic(home_team, away_team, venue, weather):
     adj = 0.0
     
-    # 1. Advanced Weather Logic
+    # 1. Park Factor (Drier Arizona air = Higher Exit Velocity)
+    if any(park in venue for park in cactus_parks):
+        adj += 0.5 
+    
+    # 2. 2026 ABS Challenge Edge
+    # If both teams are good at challenging (e.g., A's vs Giants), the Over is highly likely.
+    home_rate = team_abs_stats.get(home_team, 0.51)
+    away_rate = team_abs_stats.get(away_team, 0.51)
+    if home_rate > 0.60 and away_rate > 0.60:
+        adj += 0.8
+    elif home_rate < 0.30 and away_rate < 0.30:
+        adj -= 0.6
+
+    # 3. Weather (Wind is the 2026 MVP)
     if weather and hasattr(weather, 'wind'):
-        wind_speed = float(weather.wind.split(" ")[0])
-        # In parks like Wrigley or Scottsdale, wind OUT is a massive OVER boost
-        if "Out To" in weather.wind and wind_speed > 10:
-            adj += 0.7
-        elif "In From" in weather.wind and wind_speed > 10:
-            adj -= 0.7
-
-    # 2. 2026 ABS Challenge Factor
-    # If a team is great at challenging, they extend innings.
-    home_abs = abs_success_rates.get(home_team, 0.51) # 0.51 is league avg
-    away_abs = abs_success_rates.get(away_team, 0.51)
-    if home_abs > 0.60 or away_abs > 0.60:
-        adj += 0.4 # "The Robot Ump Factor"
-
+        if "Out To" in weather.wind: adj += 0.6
+        if "In From" in weather.wind: adj -= 0.6
+        
     return adj
 
-# --- DASHBOARD RENDER ---
-st.title("⚾ MLB Intelligence Pro: March 3, 2026")
+# --- DASHBOARD UI ---
+st.title("⚾ MLB AI Pro: March 3, 2026")
+st.subheader("Spring Training Intelligence Dashboard")
 
-schedule = mlb.get_scheduled_games_by_date(date=datetime.now().strftime("%Y-%m-%d"))
+today = datetime.now().strftime("%Y-%m-%d")
+schedule = mlb.get_scheduled_games_by_date(date=today)
 
-for game in schedule:
-    home = game.teams.home.team.name
-    away = game.teams.away.team.name
-    
-    # Fetch Live Game Intel (Weather & Pitchers)
-    weather_info, away_sp, home_sp = get_game_details(game.gamepk)
-    
-    # Logic Processing
-    weather_adj = calculate_refined_edge(game.venue.name, home, away, weather_info)
-    vegas_line = 9.5 # Replace with your Odds API call
-    ai_proj = round((vegas_line + weather_adj + 0.4) * 2) / 2
-    edge = ai_proj - vegas_line
-
-    with st.expander(f"LIVE: {away} ({away_sp}) @ {home} ({home_sp})"):
-        c1, c2, c3 = st.columns(3)
-        c1.metric("Vegas Line", vegas_line)
-        c2.metric("AI Projection", ai_proj, delta=f"{edge:+.1f}")
+if not schedule:
+    st.info("No games currently live. Check back at 1:05 PM MST.")
+else:
+    for game in schedule:
+        # Hydrate weather and pitcher data
+        detail = mlb.get_game(game.gamepk, hydrate=['weather', 'probablePitcher'])
+        home = game.teams.home.team.name
+        away = game.teams.away.team.name
+        venue = game.venue.name
         
-        if weather_info:
-            st.write(f"🌤 **Weather:** {weather_info.temp}°F, Wind: {weather_info.wind}")
+        # Calculations
+        weather = detail.weather if hasattr(detail, 'weather') else None
+        edge_adj = get_projection_logic(home, away, venue, weather)
         
-        if edge >= 1.0:
-            st.success("🎯 BET RECOMMENDED: OVER")
-        elif edge <= -1.0:
-            st.error("🎯 BET RECOMMENDED: UNDER")
+        # Display
+        with st.expander(f"🌵 {away} @ {home} - {venue}"):
+            col1, col2 = st.columns(2)
+            with col1:
+                st.write(f"**ABS Success:** {away} ({team_abs_stats.get(away, 0.51):.0%}) | {home} ({team_abs_stats.get(home, 0.51):.0%})")
+                if weather:
+                    st.write(f"🌡 {weather.temp}°F | 🌬 {weather.wind}")
+            
+            with col2:
+                if edge_adj >= 0.7:
+                    st.success(f"🔥 STRONG OVER BIAS (+{edge_adj})")
+                elif edge_adj <= -0.7:
+                    st.error(f"❄️ STRONG UNDER BIAS ({edge_adj})")
+                else:
+                    st.info("Neutral Projection")
